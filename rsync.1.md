@@ -290,25 +290,34 @@ filenames and pass it to [`--files-from`](#opt).
 
 ### Symbolic links
 
-A malicious sender can include symlinks that point outside the destination tree
-(for example at `/etc/passwd`).  Use [`--safe-links`](#opt) to ignore any symlink
-that points outside the set of files
-being transferred, or [`--munge-links`](#opt) to store every symlink in a
-form that is unusable on disk but recoverable later; `--no-links` drops symlinks
-entirely.  See the [SYMBOLIC LINKS](#) section for how these interact.
+Two separate rules apply to symlinks:
+- Symlinks in the transfer are entries found under the source and described
+  by the sender. [`--links`](#opt) (`-l`) recreates them, and [`--archive`](#opt)
+  (`-a`) implies `--links`. [`--safe-links`](#opt) filters only these entries,
+  dropping links whose targets escape the copied tree. `--archive` does not
+  enable `--safe-links`; it must be requested separately.
+  [`--munge-links`](#opt) stores every symlink in an unusable but recoverable
+  form, while `--no-links` drops them entirely.
+- Symlinks in operator-supplied paths are components of the destination or
+  another protected path named on the command line. This protection is
+  independent of `--links`, `--safe-links` and `--archive`. By default rsync
+  follows such a component only when it is owned by the running user or by
+  root. [`--insecure-links`](#opt) restores the historical
+  follow-any-symlink behaviour.
 
-Separately, the directory and file paths that *you* supply on the command line --
+For example, `rsync -ax SRC HOST:DEST` recreates symlinks found inside `SRC` and
+does not enable `--safe-links`. The operator-path check affects that command if
+`DEST` contains a symlink owned by neither the receiving rsync user nor root.
+The `-x` option does not change either rule.
+
+Protected operator-supplied paths include the destination plus
 [`--backup-dir`](#opt), [`--temp-dir`](#opt), [`--partial-dir`](#opt), the
-[`--link-dest`](#opt)/[`--compare-dest`](#opt)/[`--copy-dest`](#opt) basis directories,
-[`--log-file`](#opt), [`--password-file`](#opt),
-[`--files-from`](#opt)/`--include-from`/`--exclude-from`,
-[`--filter`](#opt) merge files, [`--write-batch`](#opt)/[`--read-batch`](#opt),
-and the destination itself -- are resolved so that a symlink component is followed
-only when it is owned by you or by root; an attacker-planted symlink along one of
-those paths is refused.  [`--insecure-links`](#opt) turns that protection off
-(restoring the historical follow-any-symlink behaviour); use it only when every
-directory along those paths is trusted, never on a path an unprivileged user can
-write.
+[`--link-dest`](#opt)/[`--compare-dest`](#opt)/[`--copy-dest`](#opt) basis
+directories, [`--log-file`](#opt), [`--password-file`](#opt),
+[`--files-from`](#opt)/`--include-from`/`--exclude-from`, [`--filter`](#opt)
+merge files and [`--write-batch`](#opt)/[`--read-batch`](#opt). Never use
+`--insecure-links` when an unprivileged user can write a directory along one of
+those paths.
 
 ### Use strong checksums
 
@@ -1380,6 +1389,11 @@ sign) if you want the local shell to expand it.
     which point outside the copied tree.  All absolute symlinks are also
     ignored.
 
+    This option applies only to symlink entries received in the file list. It
+    does not control symlink components in the destination or other protected
+    operator-supplied paths; those are handled by the default ownership check
+    described under [`--insecure-links`](#opt).
+
     Since this ignoring is happening on the receiving side, it will still be
     effective even when the sending side has munged symlinks (when it is using
     [`--munge-links`](#opt)). It also affects deletions, since the file being
@@ -1389,7 +1403,8 @@ sign) if you want the local shell to expand it.
     This option has no effect unless it is combined with [`--links`](#opt) (or
     an option that implies [`--links`](#opt) such as [`--archive`](#opt)),
     because without [`--links`](#opt) there will not be any symlinks in the
-    transfer.  Its effect is superseded by [`--copy-unsafe-links`](#opt).
+    transfer. [`--archive`](#opt) does not itself enable `--safe-links`. Its
+    effect is superseded by [`--copy-unsafe-links`](#opt).
 
     Using this option in conjunction with [`--relative`](#opt) may give
     unexpected results.
@@ -4954,6 +4969,9 @@ can ignore this detail and just use the shell script as an easy way to run the
 appropriate [`--read-batch`](#opt) command for the batched data.
 
 ## SYMBOLIC LINKS
+
+This section describes symlink entries in the transfer. Symlink components in
+operator-supplied paths are handled separately; see [`--insecure-links`](#opt).
 
 Three basic behaviors are possible when rsync encounters a symbolic
 link in the source directory.
