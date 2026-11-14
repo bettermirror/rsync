@@ -84,6 +84,7 @@ class Network(unittest.TestCase):
         self.addCleanup(ci.source.cache_clear)
         run = dict(id=123, run_attempt=2, path='.github/workflows/ci.yml', name='CI', event='pull_request',
                    repository=dict(id=266877886), head_repository=dict(id=999), head_sha='b' * 40,
+                   created_at='2026-11-14T00:00:00Z',
                    referenced_workflows=[dict(path=ci.WORKFLOW + 'a' * 40, sha='a' * 40)])
         with patch.object(ci, 'api', return_value=run):
             self.assertEqual(ci.identity(), self.state)
@@ -92,33 +93,90 @@ class Network(unittest.TestCase):
             ci.source()
 
     def test_controller_discovery_requires_trusted_code_and_exact_attempt(self):
-        origin = dict(self.state, head_sha='b' * 40)
+        origin = dict(self.state, head_sha='b' * 40, created_at='2026-11-14T00:00:00Z')
         run = dict(id=456, run_attempt=1, path='.github/workflows/interoperability.yml', head_branch='master',
                    event='workflow_run', display_title='Network CI 123 attempt 2', repository=dict(id=266877886),
-                   head_sha='c' * 40, status='in_progress')
+                   head_sha='c' * 40, status='in_progress', created_at='2026-11-14T00:00:01Z')
         metadata = dict(self.state, control_run_id='456', control_attempt='1', control_sha='c' * 40)
         with patch.object(ci, 'source', return_value=origin), \
-                patch.object(ci, 'api', side_effect=[dict(workflow_runs=[run]),
+                patch.object(ci, 'api', side_effect=[dict(total_count=1, workflow_runs=[run]),
                     dict(total_count=1, artifacts=[dict(name='interoperability-context-1', expired=False)])]), \
                 patch.object(ci, 'download_records', return_value={None: (metadata, b'{}')}):
             self.assertEqual(ci.controller(), '456')
         for field, value in dict(head_branch='untrusted', event='pull_request', repository=dict(id=1)).items():
             with self.subTest(field=field), patch.object(ci, 'source', return_value=origin), \
-                    patch.object(ci, 'api', return_value=dict(workflow_runs=[dict(run, **{field: value})])), self.assertRaises(network.NetworkError):
+                    patch.object(ci, 'api', return_value=dict(
+                        total_count=1, workflow_runs=[dict(run, **{field: value})])), self.assertRaises(network.NetworkError):
                 ci.controller()
 
     def test_first_controller_context_survives_a_later_duplicate(self):
-        origin = dict(self.state, head_sha='b' * 40)
+        origin = dict(self.state, head_sha='b' * 40, created_at='2026-11-14T00:00:00Z')
         run = dict(id=456, run_attempt=1, path='.github/workflows/interoperability.yml', head_branch='master',
                    event='workflow_run', display_title='Network CI 123 attempt 2', repository=dict(id=266877886),
-                   head_sha='c' * 40, status='completed', conclusion='success')
+                   head_sha='c' * 40, status='completed', conclusion='success',
+                   created_at='2026-11-14T00:00:01Z')
         duplicate = dict(run, id=457, conclusion='failure')
         metadata = dict(self.state, control_run_id='456', control_attempt='1', control_sha='c' * 40)
         with patch.object(ci, 'source', return_value=origin), patch.object(ci, 'api', side_effect=[
-                dict(workflow_runs=[duplicate, run]),
+                dict(total_count=2, workflow_runs=[duplicate, run]),
                 dict(total_count=1, artifacts=[dict(name='interoperability-context-1', expired=False)])]), \
                 patch.object(ci, 'download_records', return_value={None: (metadata, b'{}')}):
             self.assertEqual(ci.controller(), '456')
+
+    def test_controller_listing_is_paged_and_stops_before_the_ci_run(self):
+        origin = dict(self.state, head_sha='b' * 40, created_at='2026-11-14T00:00:20Z')
+        unrelated = [dict(id=500 + index, created_at='2026-11-14T00:00:30Z',
+                          display_title='other') for index in range(20)]
+        current = dict(id=456, run_attempt=1, path='.github/workflows/interoperability.yml',
+                       head_branch='master', event='workflow_run', display_title='Network CI 123 attempt 2',
+                       repository=dict(id=266877886), head_sha='c' * 40, status='in_progress',
+                       created_at='2026-11-14T00:00:21Z')
+        older = dict(current, id=455, created_at='2026-11-14T00:00:19Z')
+        metadata = dict(self.state, control_run_id='456', control_attempt='1', control_sha='c' * 40)
+        def listing(path):
+            if '/actions/workflows/' in path:
+                self.assertIn('per_page=20&page=', path)
+                if path.endswith('page=1'):
+                    return dict(total_count=22, workflow_runs=unrelated)
+                self.assertTrue(path.endswith('page=2'))
+                return dict(total_count=22, workflow_runs=[current, older])
+            self.assertEqual(path, '/actions/runs/456/artifacts?per_page=100')
+            return dict(total_count=1, artifacts=[dict(name='interoperability-context-1', expired=False)])
+        with patch.object(ci, 'source', return_value=origin), patch.object(ci, 'api', side_effect=listing), \
+                patch.object(ci, 'download_records', return_value={None: (metadata, b'{}')}):
+            self.assertEqual(ci.controller(), '456')
+
+    def test_normal_controller_title_uses_the_exact_context_identity(self):
+        origin = dict(self.state, head_sha='b' * 40, created_at='2026-11-14T00:00:00Z')
+        run = dict(run_attempt=1, path='.github/workflows/interoperability.yml', head_branch='master',
+                   event='workflow_run', display_title='Network controller', repository=dict(id=266877886),
+                   head_sha='c' * 40, status='in_progress', created_at='2026-11-14T00:00:01Z')
+        foreign, current = dict(run, id=455), dict(run, id=456)
+        artifact = dict(total_count=1, artifacts=[dict(name='interoperability-context-1', expired=False)])
+        foreign_context = dict(self.state, run_id='122', control_run_id='455', control_attempt='1', control_sha='c' * 40)
+        current_context = dict(self.state, control_run_id='456', control_attempt='1', control_sha='c' * 40)
+        with patch.object(ci, 'source', return_value=origin), patch.object(ci, 'api', side_effect=[
+                dict(total_count=2, workflow_runs=[current, foreign]), artifact, artifact]), \
+                patch.object(ci, 'download_records', side_effect=[
+                    {None: (foreign_context, b'{}')}, {None: (current_context, b'{}')}]):
+            self.assertEqual(ci.controller(), '456')
+
+    def test_controller_listing_rejects_invalid_or_truncated_results(self):
+        origin = dict(self.state, head_sha='b' * 40, created_at='2026-11-14T00:00:00Z')
+        recent = dict(id=500, created_at='2026-11-14T00:00:30Z', display_title='other')
+        invalid = [dict(workflow_runs=[]), dict(total_count=1, workflow_runs=None),
+                   dict(total_count=21, workflow_runs=[recent] * 21),
+                   dict(total_count=1, workflow_runs=[dict(recent, created_at='invalid')])]
+        for value in invalid:
+            with self.subTest(listing=value), patch.object(ci, 'source', return_value=origin), \
+                    patch.object(ci, 'api', return_value=value), \
+                    self.assertRaisesRegex(network.NetworkError, 'Invalid controller run listing'):
+                ci.find_controller()
+        with patch.object(ci, 'source', return_value=origin), \
+                patch.object(ci, 'api', return_value=dict(total_count=101, workflow_runs=[recent] * 20)) as api, \
+                self.assertRaisesRegex(network.NetworkError, 'Controller run listing exceeds limit'):
+            ci.find_controller()
+        self.assertEqual(api.call_count, 5)
 
     def test_duplicate_controller_never_issues_another_enrolment(self):
         output = self.root / 'output'
@@ -304,6 +362,33 @@ class Network(unittest.TestCase):
                                download_records=lambda *args, **kwargs: self.fail('Clean controller requested a lease'),
                                Tailnet=lambda: self.fail('Clean controller obtained network authority')):
                 broker['recover'](self.root)
+
+    def test_recovery_skips_only_explicitly_unattempted_key_issuance(self):
+        run = dict(id=456, run_attempt=1, path='.github/workflows/interoperability.yml', head_branch='master',
+                   event='workflow_run', head_sha='c' * 40, repository=dict(id=266877886),
+                   status='completed', conclusion='failure')
+        step = dict(name='Issue single-use enrolment keys', status='completed', conclusion='skipped')
+        job = dict(name='Admission and cleanup', run_id=456, run_attempt=1, status='completed', steps=[step])
+        variants = [(job, True), (dict(job, run_id=999), False), (dict(job, run_attempt=2), False),
+                    (dict(job, name='other'), False), (dict(job, status='in_progress'), False),
+                    (dict(job, steps=[]), False), (dict(job, steps=[step, step]), False),
+                    (dict(job, steps=[dict(step, status='in_progress')]), False)]
+        variants += [(dict(job, steps=[dict(step, conclusion=value)]), False)
+                     for value in ('success', 'failure', 'cancelled', None)]
+        for candidate, skipped in variants:
+            responses = [(json.dumps(run).encode(), {}),
+                         (json.dumps(dict(total_count=1, jobs=[candidate])).encode(), {})]
+            with self.subTest(job=candidate), \
+                    patch.dict(os.environ, INTEROP_RECOVER_RUN='456', INTEROP_RECOVER_ATTEMPT='1'), \
+                    patch.object(network, 'fetch', side_effect=responses), \
+                    patch.dict(broker['recover'].__globals__,
+                               download_records=Mock(side_effect=network.NetworkError('lease required')),
+                               Tailnet=lambda: self.fail('Unverified recovery obtained network authority')):
+                if skipped:
+                    broker['recover'](self.root)
+                else:
+                    with self.assertRaisesRegex(network.NetworkError, 'lease required'):
+                        broker['recover'](self.root)
 
     def test_recovery_verifies_exact_bytes_before_any_mutation(self):
         run = dict(id=456, run_attempt=1, path='.github/workflows/interoperability.yml',

@@ -148,13 +148,19 @@ def recover(root):
         return
     if len(jobs) != 1:
         raise NetworkError('Unexpected controller jobs')
-    if (jobs[0].get('name') == 'Admission and cleanup'
-            and jobs[0].get('run_id') == int(run_id) and jobs[0].get('run_attempt') == int(attempt)
-            and jobs[0].get('status') == 'completed' and any(
-            step.get('name') == 'Verify revocation and remove devices' and step.get('conclusion') == 'success'
-            for step in jobs[0].get('steps', []))):
-        print('Controller cleanup already completed')
-        return
+    job = jobs[0]
+    if (job.get('name') == 'Admission and cleanup'
+            and job.get('run_id') == int(run_id) and job.get('run_attempt') == int(attempt)
+            and job.get('status') == 'completed'):
+        if any(step.get('name') == 'Verify revocation and remove devices' and step.get('conclusion') == 'success'
+               for step in job.get('steps', [])):
+            print('Controller cleanup already completed')
+            return
+        issuance = [step for step in job.get('steps', []) if step.get('name') == 'Issue single-use enrolment keys']
+        if (len(issuance) == 1 and issuance[0].get('status') == 'completed'
+                and issuance[0].get('conclusion') == 'skipped'):
+            print('Controller did not issue enrolment keys')
+            return
     name = 'interoperability-lease-' + attempt
     lease, raw = download_records(run_id, {name: None}, timeout=60)[None]
     path = root / 'recovery-lease.json'
